@@ -74,53 +74,123 @@ class CustomLoss(nn.Module):
 
         return bce_loss + self.lambda_fpr * (fpr-1e-4)**2
 
-def train_no_sigmoid(net,model_name,train_iter,test_iter,
-                     num_epochs,lr,device=d2l.try_gpu(),threshold=0.5):
+
+import torch
+import torch.nn as nn
+from d2l import torch as d2l
+import matplotlib.pyplot as plt
+
+
+def train_no_sigmoid(net, model_name, train_iter, val_iter, num_epochs, lr, snr_range=None, device=d2l.try_gpu(),
+                     threshold=0.5):
+    """
+    训练一个 epoch，支持课程学习
+    :param net: PyTorch 模型
+    :param model_name: 模型保存文件名
+    :param train_iter: 训练 DataLoader
+    :param val_iter: 验证 DataLoader
+    :param num_epochs: epoch 数
+    :param lr: 学习率
+    :param snr_range: SNR 范围（例如，(-5, 0)），用于日志
+    :param device: 设备 (GPU/CPU)
+    :param threshold: 二分类阈值
+    """
     best_acc = 0.0
-    print('training on ',device)
+    snr_str = f"SNR {snr_range[0]} to {snr_range[1]}" if snr_range else "All SNR"
+    print(f"Training on {device} for {snr_str}")
     net.to(device)
-    optimizer=torch.optim.SGD(net.parameters(),lr=lr)
-    pos_weight = torch.tensor([25.0]).to(device)  # 视数据不均衡程度调整
+    optimizer = torch.optim.SGD(net.parameters(), lr=lr)
+    pos_weight = torch.tensor([1.0]).to(device)  # 视数据不均衡程度调整
     loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    # loss=nn.BCELoss()
-    animator=d2l.Animator(xlabel='epoch',xlim=[1,num_epochs],ylim=[0,1],
-    legend=['train_loss','train_acc','test_acc'])
-    timer,num_batches=d2l.Timer(),len(train_iter)
+
+    animator = d2l.Animator(xlabel='epoch', xlim=[1, num_epochs], ylim=[0, 1],
+                            legend=['train_loss', 'train_acc', 'val_acc'])
+    timer, num_batches = d2l.Timer(), len(train_iter)
+
     for epoch in range(num_epochs):
-        metric=d2l.Accumulator(3)
+        metric = d2l.Accumulator(3)
         net.train()
-        for i ,(X,y) in enumerate(train_iter):
+        for i, (X, y) in enumerate(train_iter):
             timer.start()
             optimizer.zero_grad()
-            X,y=X.to(device),y.to(device)
-            y_hat=net(X).squeeze(dim=1)
-            l=loss(y_hat,y)
+            X, y = X.to(device), y.to(device)
+            y_hat = net(X).squeeze(dim=1)
+            l = loss(y_hat, y)
             l.backward()
             optimizer.step()
-            # 梯度裁剪（防止爆炸）
             torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
             with torch.no_grad():
-                # 计算训练精度
-                y_pred = (torch.sigmoid(y_hat) >= threshold).float()  # 转换为 0/1
-                metric.add(l*X.shape[0],d2l.accuracy(y_pred,y),X.shape[0])
-            timer.stop()
-            train_l = metric[0] / metric[2]
-            train_acc = metric[1] / metric[2]
-            if (i + 1) % (num_batches // 5) == 0 or i == num_batches - 1:
-                animator.add(epoch + (i + 1) / num_batches,
-                             (train_l, train_acc, None))
-        test_acc=evaluate_accuracy_gpu(net,test_iter,threshold,device)
-        animator.add(epoch + 1, (None, None, test_acc))
-        if test_acc>best_acc:
-            best_acc=test_acc
-            save_model(net,model_name=model_name)
+                y_pred = (torch.sigmoid(y_hat) >= threshold).float()
+                metric.add(l * X.shape[0], d2l.accuracy(y_pred, y), X.shape[0])
+                timer.stop()
+                train_l = metric[0] / metric[2]
+                train_acc = metric[1] / metric[2]
+                if (i + 1) % (num_batches // 5) == 0 or i == num_batches - 1:
+                    animator.add(epoch + (i + 1) / num_batches, (train_l, train_acc, None))
+
+        val_acc = evaluate_accuracy_gpu(net, val_iter, threshold, device)
+        animator.add(epoch + 1, (None, None, val_acc))
+
+        if val_acc > best_acc:
+            best_acc = val_acc
+            torch.save(net.state_dict(), model_name)
+            # save_model(net, model_name=model_name)
             print(f"最佳测试准确率更新至: {best_acc:.3f}, 模型已保存")
-        print(f'loss {train_l:.3f}, train acc {train_acc:.3f}, '
-          f'test acc {test_acc:.3f}')
-        print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec '
-              f'on {str(device)}')
-    plt.savefig('accuracy.png')
-    plt.show()
+
+            print(f'{snr_str} Epoch {epoch + 1}: loss {train_l:.5f}, train acc {train_acc:.3f}, val acc {val_acc:.3f}')
+            print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec on {str(device)}')
+        plt.savefig(f'accuracy_{snr_str.replace(" ", "_")}.png')
+        plt.close()
+        if train_l < 1e-4:
+            print('loss < 1e-4, stop training this stage')
+            break
+# def train_no_sigmoid(net,model_name,train_iter,val_iter,
+#                      num_epochs,lr,device=d2l.try_gpu(),threshold=0.5):
+#     best_acc = 0.0
+#     print('training on ',device)
+#     net.to(device)
+#     optimizer=torch.optim.SGD(net.parameters(),lr=lr)
+#     pos_weight = torch.tensor([1.0]).to(device)  # 视数据不均衡程度调整
+#     loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+#     # loss=nn.BCELoss()
+#     animator=d2l.Animator(xlabel='epoch',xlim=[1,num_epochs],ylim=[0,1],
+#     legend=['train_loss','train_acc','val_acc'])
+#     timer,num_batches=d2l.Timer(),len(train_iter)
+#     for epoch in range(num_epochs):
+#         metric=d2l.Accumulator(3)
+#         net.train()
+#         for i ,(X,y) in enumerate(train_iter):
+#             timer.start()
+#             optimizer.zero_grad()
+#             X,y=X.to(device),y.to(device)
+#             y_hat=net(X).squeeze(dim=1)
+#             l=loss(y_hat,y)
+#             l.backward()
+#             optimizer.step()
+#             # 梯度裁剪（防止爆炸）
+#             torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+#             with torch.no_grad():
+#                 # 计算训练精度
+#                 y_pred = (torch.sigmoid(y_hat) >= threshold).float()  # 转换为 0/1
+#                 metric.add(l*X.shape[0],d2l.accuracy(y_pred,y),X.shape[0])
+#             timer.stop()
+#             train_l = metric[0] / metric[2]
+#             train_acc = metric[1] / metric[2]
+#             if (i + 1) % (num_batches // 5) == 0 or i == num_batches - 1:
+#                 animator.add(epoch + (i + 1) / num_batches,
+#                              (train_l, train_acc, None))
+#         val_acc=evaluate_accuracy_gpu(net,val_iter,threshold,device)
+#         animator.add(epoch + 1, (None, None, val_acc))
+#         if val_acc>best_acc:
+#             best_acc=val_acc
+#             save_model(net,model_name=model_name)
+#             print(f"最佳测试准确率更新至: {best_acc:.3f}, 模型已保存")
+#         print(f'loss {train_l:.3f}, train acc {train_acc:.3f}, '
+#           f'val acc {val_acc:.3f}')
+#         print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec '
+#               f'on {str(device)}')
+#     plt.savefig('accuracy.png')
+#     plt.show()
 def save_pd_pfa_to_txt(filename, results):
     """将 pd 和 pfa 保存到 TXT 文件"""
     with open(filename, "w") as f:
@@ -128,7 +198,7 @@ def save_pd_pfa_to_txt(filename, results):
             f.write(f"{model_name}\n")
             f.write("pd: " + ",".join(map(str, pd_list)) + "\n")
             f.write("pfa: " + ",".join(map(str, pfa_list)) + "\n\n")
-def predict_scr_pd_pfa(weight_path,model_num,test_loaders,pic_name,
+def predict_scr_pd_pfa(weight_path,model_num,clutter_loader,test_loaders,pic_name,
                        device=d2l.try_gpu(),input_length=210,threshold=0.999):
     models = {
         "4": "cnn_mul",
@@ -148,6 +218,16 @@ def predict_scr_pd_pfa(weight_path,model_num,test_loaders,pic_name,
     snr_db = np.linspace(-10, 20, len(scr_levels))  # 将 SNR 映射到 -10 dB 到 20 dB
     # 3. 遍历不同 SNR 测试集
     with torch.no_grad():
+        cl_sum,cl_false=0,0
+        for X_clutter, y_clutter in clutter_loader:
+            X_clutter, y_clutter = X_clutter.to(device), y_clutter.to(device)
+            y_hat_cl = net(X_clutter).squeeze(dim=1)
+            y_pred = (torch.sigmoid(y_hat_cl) >= threshold).float()  # 计算预测值
+            cl_sum+=y_hat_cl.size(0)
+            cl_false += (y_pred != y_clutter).sum().item()
+        pfa=cl_false/cl_sum
+        print(pfa)
+        pfa_list.append(pfa)
         for snr in scr_levels:
             test_loader = test_loaders[snr]
             tp, fn, fp, tn = 0, 0, 0, 0  # 统计 TP, FN, FP, TN
@@ -163,28 +243,25 @@ def predict_scr_pd_pfa(weight_path,model_num,test_loaders,pic_name,
 
             # 计算 Pd (检测概率) 和 Pfa (虚警率)
             pd = tp / (tp + fn) if (tp + fn) > 0 else 0  # Pd = TP / (TP + FN)
-            pfa = fp / (fp + tn) if (fp + tn) > 0 else 0  # Pfa = FP / (FP + TN)
-
             pd_list.append(pd)
-            pfa_list.append(pfa)
 
-            print(f"SNR {snr}: Pd = {pd:.3f}, Pfa = {pfa:.3f}")
+            print(f"SNR {snr}: Pd = {pd:.5f}")
 
     # 绘制 Pd 和 Pfa 随 SNR 变化的曲线
     plt.figure(figsize=(8, 6))
-    plt.plot(snr_db, pd_list, marker='o', linestyle='-', color='b', label='Pd (Detection Probability)')
-    plt.plot(snr_db, pfa_list, marker='s', linestyle='--', color='r', label='Pfa (False Alarm Rate)')
+    plt.plot(snr_db, pd_list, marker='o', linestyle='-', color='b', label=f'{models[str(model_num)]}Pd')
+    # plt.plot(snr_db, pfa_list, marker='s', linestyle='--', color='r', label='Pfa (False Alarm Rate)')
 
-    plt.xlabel('SNR (dB)')
-    plt.ylabel('Probability')
-    plt.title('Detection Probability (Pd) and False Alarm Rate (Pfa) vs SNR')
+    plt.xlabel('SCR (dB)')
+    plt.ylabel('Pd')
+    plt.title('Pd vs SNR')
     plt.legend()
     plt.grid(True)
     plt.savefig(pic_name)  # 保存图片
     plt.show()
 
     # 将pd_list,pfa_list写入txt文件
-    with open("results_pd_pfa.txt", "a") as f:
+    with open("results_pd_pfa_base.txt", "a") as f:
         f.write(f"{models[str(model_num)]}:\n")
         f.write("pd: " + ",".join(map(str, pd_list)) + "\n")
         f.write("pfa: " + ",".join(map(str, pfa_list)) + "\n\n")
@@ -320,36 +397,104 @@ def predict(weight_path,input_length,data,device=d2l.try_gpu(),threshold=0.999,b
         plt.show()
 from Dataset import *
 
-def train_weights_save():
+
+def train_weights_save(train_h5="train.h5", val_h5="val.h5", batch_size=128, save_path="weights"):
+    """
+    训练多个模型，按 SNR 范围逐步训练（课程学习），保存权重
+    :param train_h5: 训练 HDF5 文件路径
+    :param val_h5: 验证 HDF5 文件路径
+    :param batch_size: batch size
+    :param save_path: 权重保存路径
+    """
     set_seed(42)
-    train_loader, test_loaders = get_dataloaders("train_data.h5", "test_data.h5", batch_size=64)
-    train_iter, test_iter = train_loader, test_loaders['SNR_20']
-    # 初始化模型
     device = d2l.try_gpu()
-    # 多通道并行卷积，网络训练并且保存模型，画出pd，pf曲线
-    net = init_model(input_length=210, model_num=4)
-    print(net)
-    train_no_sigmoid(net=net,model_name='best_cnn_mul.pth',train_iter=train_iter,
-                     test_iter=test_iter,num_epochs=10,lr=0.05,
-                     device=device,threshold=0.999)
-    # 简单的基层卷积，。。。。。。。
-    net = init_model(input_length=210, model_num=2)
-    print(net)
-    train_no_sigmoid(net=net,model_name='best_cnn_easy.pth',train_iter=train_iter,
-                     test_iter=test_iter,num_epochs=10,lr=0.08,
-                     device=device,threshold=0.999)
-    # VGG11，。。。。。。。
-    net = init_model(input_length=210, model_num=3)
-    print(net)
-    train_no_sigmoid(net=net,model_name='best_VGG11.pth',train_iter=train_iter,
-                     test_iter=test_iter,num_epochs=10,lr=0.05,
-                     device=device,threshold=0.999)
-    # Resnet18 ....
-    net = init_model(input_length=210, model_num=1)
-    print(net)
-    train_no_sigmoid(net=net, model_name='best_Resnet18.pth', train_iter=train_iter,
-                     test_iter=test_iter, num_epochs=10,
-                     lr=0.05, device=device, threshold=0.999)
+    train_loaders, val_loader = get_dataloaders(train_h5, val_h5, batch_size=batch_size)
+
+    # 定义模型配置
+    models = [
+        # {"model_num": 2, "name": "cnn_easy", "epochs": 20, "lr": 0.08},
+        {"model_num": 3, "name": "VGG11", "epochs": 20, "lr": 0.05},
+        # {"model_num": 1, "name": "Resnet18", "epochs": 20, "lr": 0.05},
+    ]
+
+    # # 课程学习顺序（从高 SNR 到低 SNR）
+    # snr_ranges = [(10, 20), (0, 10), (-10, 0)]
+    #
+    # os.makedirs(save_path, exist_ok=True)
+    # epoch_schedule = {
+    #     (10, 20): 10,
+    #     (0, 10): 8,
+    #     (-10, 0): 10
+    # }
+    # base+se
+    snr_ranges=[(-10, 20)]
+    os.makedirs(save_path, exist_ok=True)
+    epoch_schedule = {
+        (-10, 20): 20
+    }
+    for model_config in models:
+        model_num = model_config["model_num"]
+        model_name = model_config["name"]
+        lr = model_config["lr"]
+
+        print(f"\n开始训练模型: {model_name}")
+        net = init_model(input_length=210, model_num=model_num)
+        print(net)
+
+        # 按 SNR 范围逐步训练
+        for snr_min, snr_max in snr_ranges:
+            snr_key = f"SNR_{snr_min}_{snr_max}"
+            num_epochs = epoch_schedule.get((snr_min, snr_max), 10)
+            if snr_key not in train_loaders:
+                print(f"跳过 SNR 范围 [{snr_min}, {snr_max}]：无数据")
+                continue
+
+            print(f"\n训练 SNR 范围 [{snr_min}, {snr_max}]")
+            train_loader = train_loaders[snr_key]
+            model_filename = os.path.join(save_path, f"best_{model_name}_snr_{snr_min}_{snr_max}.pth")
+
+            train_no_sigmoid(
+                net=net,
+                model_name=model_filename,
+                train_iter=train_loader,
+                val_iter=val_loader,
+                num_epochs=num_epochs,
+                lr=lr,
+                snr_range=(snr_min, snr_max),
+                device=device,
+                threshold=0.999
+            )
+
+        print(f"完成模型 {model_name} 的训练")
+# def train_weights_save():
+#     set_seed(42)
+#     train_loader, val_loader = get_dataloaders("train.h5", "val.h5", batch_size=128)
+#     # 初始化模型
+#     device = d2l.try_gpu()
+#     # # 多通道并行卷积，网络训练并且保存模型，画出pd，pf曲线
+#     # net = init_model(input_length=210, model_num=4)
+#     # print(net)
+#     # train_no_sigmoid(net=net,model_name='best_cnn_mul.pth',train_iter=train_loader,
+#     #                  val_iter=val_loader,num_epochs=10,lr=0.05,
+#     #                  device=device,threshold=0.999)
+#     # 简单的基层卷积，。。。。。。。
+#     net = init_model(input_length=210, model_num=2)
+#     print(net)
+#     train_no_sigmoid(net=net,model_name='best_cnn_easy.pth',train_iter=train_loader,
+#                      val_iter=val_loader,num_epochs=20,lr=0.08,
+#                      device=device,threshold=0.999)
+#     # VGG11，。。。。。。。
+#     net = init_model(input_length=210, model_num=3)
+#     print(net)
+#     train_no_sigmoid(net=net,model_name='best_VGG11.pth',train_iter=train_loader,
+#                      val_iter=val_loader,num_epochs=20,lr=0.05,
+#                      device=device,threshold=0.999)
+#     # Resnet18 ....
+#     net = init_model(input_length=210, model_num=1)
+#     print(net)
+#     train_no_sigmoid(net=net, model_name='best_Resnet18.pth', train_iter=train_loader,
+#                      val_iter=val_loader, num_epochs=20,
+#                      lr=0.05, device=device, threshold=0.999)
 def set_seed(seed=42):
     random.seed(seed)  # 固定 Python 内置 random
     np.random.seed(seed)  # 固定 NumPy
@@ -361,21 +506,22 @@ def set_seed(seed=42):
 
 def write_txt_pd_pfa_all():
     set_seed(42)
-    train_loader, test_loaders = get_dataloaders("train_data.h5", "test_data.h5", batch_size=64)
-    predict_scr_pd_pfa(weight_path='./saved_models/best_cnn_easy.pth', model_num=2,
-                       pic_name='scr_cnn_easy_pd_pfa',input_length=210,
-                       test_loaders=test_loaders, device=d2l.try_gpu())
-    predict_scr_pd_pfa(weight_path='./saved_models/best_cnn_mul.pth', model_num=4,
-                       pic_name='scr_cnn_mul_pd_pfa',input_length=210,
-                       test_loaders=test_loaders, device=d2l.try_gpu())
-    predict_scr_pd_pfa(weight_path='./saved_models/best_VGG11.pth', model_num=3,
-                       pic_name='scr_vgg11_pd_pfa',input_length=210,
-                       test_loaders=test_loaders, device=d2l.try_gpu())
+    clutter_loader, tg_loaders = get_dataloaders_test("test.h5", batch_size=128)
     predict_scr_pd_pfa(weight_path='./saved_models/best_Resnet18.pth', model_num=1,
-                       pic_name='scr_Resnet18_pd_pfa',input_length=210,
-                       test_loaders=test_loaders, device=d2l.try_gpu())
-def plot_comparasion_from_txt(txt_path):
+                       pic_name='scr_cnn_easy_pd_pfa',input_length=210,clutter_loader=clutter_loader,
+                       test_loaders=tg_loaders, device=d2l.try_gpu())
+    # predict_scr_pd_pfa(weight_path='./saved_models/best_cnn_mul.pth', model_num=4,
+    #                    pic_name='scr_cnn_mul_pd_pfa',input_length=210,clutter_loader=clutter_loader,
+    #                    test_loaders=tg_loaders, device=d2l.try_gpu())
+    # predict_scr_pd_pfa(weight_path='./weights_base_dualse/best_VGG11_snr_-10_20.pth', model_num=3,
+    #                    pic_name='scr_vgg11_pd_pfa',input_length=210,clutter_loader=clutter_loader,
+    #                    test_loaders=tg_loaders, device=d2l.try_gpu())
+    # predict_scr_pd_pfa(weight_path='./weights_base_dualse/best_Resnet18_snr_-10_20.pth', model_num=1,
+    #                    pic_name='scr_Resnet18_pd_pfa',input_length=210,clutter_loader=clutter_loader,
+    #                    test_loaders=tg_loaders, device=d2l.try_gpu())
+def plot_comparasion_from_txt(txt_path,pic_name):
     pd={}
+    num_points=0
     with open(txt_path, 'r')as f:
         content=f.read()
     # 按模型分割数据
@@ -390,9 +536,11 @@ def plot_comparasion_from_txt(txt_path):
                 pd_values = line.split("pd:")[1].strip().split(",")  # 获取 `pd` 后面的数据
                 pd_values = [float(value) for value in pd_values]  # 转换为浮点数
                 pd[model_name] = pd_values  # 存入字典
+                num_points=len(pd[model_name])
 
     print(pd)
-    num_points = len(pd['cnn_easy'])  # 取出任意模型的 pd 数据长度
+    print(num_points)
+    # num_points = len(pd['Resnet18_base'])  # 取出任意模型的 pd 数据长度
     snr_db = np.linspace(-10, 20, num_points)  # 生成等间距的 SNR 值
     for model_name,values in pd.items():
         if values == [] or model_name == []:
@@ -405,48 +553,19 @@ def plot_comparasion_from_txt(txt_path):
 
     # 添加标题和轴标签
     plt.title('PD Comparison')
-    plt.xlabel('SNR (dB)')
+    plt.xlabel('SCR (dB)')
     plt.ylabel('PD Value')
-    plt.savefig('pd_comparison.png')
+    plt.savefig(pic_name)
     # 显示图表
     plt.show()
 
 if __name__ == '__main__':
-    # write_txt_pd_pfa()
-    txt_path='results_pd_pfa.txt'
-    plot_comparasion_from_txt(txt_path)
-    # set_seed(42)
-    # train_loader, test_loaders = get_dataloaders("train_data.h5", "test_data.h5", batch_size=64)
-    # train_iter, test_iter = train_loader, test_loaders['SNR_20']
-    # # 初始化模型
-    # device = d2l.try_gpu()
-    # # # 多通道并行卷积，网络训练并且保存模型，画出pd，pf曲线
-    # # net = init_model(input_length=210, model_num=4)
-    # # print(net)
-    # # train_no_sigmoid(net=net, model_name='best_cnn_mul.pth', train_iter=train_iter, test_iter=test_iter, num_epochs=10,
-    # #                  lr=0.05, device=device, threshold=0.999)
-    # # cnn_mul_pdlist,cnn_mul_pfalist=predict_scr_pd_pfa(weight_path='./saved_models/best_cnn_mul.pth', model_num=4,pic_name='scr_cnn_mul_pd_pfa',input_length=210, test_loaders=test_loaders, device=d2l.try_gpu())
-    # # 简单的基层卷积，。。。。。。。
-    # net = init_model(input_length=210, model_num=2)
-    # print(net)
-    # # 0.08 效果远好于0.05
-    # train_no_sigmoid(net=net, model_name='best_cnn_easy.pth', train_iter=train_iter, test_iter=test_iter, num_epochs=10,
-    #                  lr=0.08, device=device, threshold=0.999)
-    # predict_scr_pd_pfa(weight_path='./saved_models/best_cnn_easy.pth', model_num=2,pic_name='scr_cnn_easy_pd_pfa',input_length=210, test_loaders=test_loaders, device=d2l.try_gpu())
-    # # VGG11，。。。。。。。
-    # net = init_model(input_length=210, model_num=3)
-    # print(net)
-    # train_no_sigmoid(net=net, model_name='best_VGG11.pth', train_iter=train_iter, test_iter=test_iter, num_epochs=10,
-    #                  lr=0.05, device=device, threshold=0.999)
-    # vgg11_pdlist,vgg11_pfalist=predict_scr_pd_pfa(weight_path='./saved_models/best_VGG11.pth', model_num=3,pic_name='scr_vgg11_pd_pfa',input_length=210, test_loaders=test_loaders, device=d2l.try_gpu())
-    # Resnet18 ....
-    # net = init_model(input_length=210, model_num=1)
-    # print(net)
-    # train_no_sigmoid(net=net, model_name='best_Resnet18.pth', train_iter=train_iter, test_iter=test_iter, num_epochs=10,
-    #                  lr=0.05, device=device, threshold=0.999)
-    # resnet18_pdlist, resnet18_pfalist = predict_scr_pd_pfa(weight_path='./saved_models/best_Resnet18.pth', model_num=1,
-    #                                                  pic_name='scr_Resnet18_pd_pfa', input_length=210,
-    #                                                  test_loaders=test_loaders, device=d2l.try_gpu())
+    # train_weights_save(train_h5="train.h5", val_h5="val.h5", batch_size=256, save_path="saved_models")
+    # write_txt_pd_pfa_all()
+    txt_path= 'results_pd_pfa_base.txt'
+    pic_name='results_pd_pfa_base'
+    plot_comparasion_from_txt(txt_path,pic_name)
+
 
 
 
